@@ -60,8 +60,8 @@ ENABLE_SSL="True"
 # Provide Email to register ssl certificate
 ADMIN_EMAIL="odoo@example.com"
 
-# Enterprise login (respetado según tu script)
-GITHUB_ENTERPRISE_USER="jroigesapen"
+# Enterprise login 
+GITHUB_ENTERPRISE_USER=""
 GITHUB_ENTERPRISE_TOKEN=" "
 
 # ---- Helpers ----
@@ -95,7 +95,7 @@ fi
 #--------------------------------------------------
 # Update Server
 #--------------------------------------------------
-echo -e "\n---- Update Server ----
+echo -e "\n---- Update Server ----"
 sudo apt-get update -y
 sudo apt-get upgrade -y
 sudo apt-get install -y libpq-dev curl wget ca-certificates
