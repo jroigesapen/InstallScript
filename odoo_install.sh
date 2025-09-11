@@ -35,16 +35,16 @@ OE_VERSION="19.0"
 IS_ENTERPRISE="True"
 
 # Installs postgreSQL V16 from PGDG repo (improved performance)
-INSTALL_POSTGRESQL_SIXTEEN="True"  # nombre histórico, instala 16 realmente
+INSTALL_POSTGRESQL_SIXTEEN="False"  # Instala Postgresql 16
 
 # Set this to True if you want to install Nginx!
-INSTALL_NGINX="False"
+INSTALL_NGINX="True"
 
 # Set the superadmin password - if GENERATE_RANDOM_PASSWORD is set to "True" we will automatically generate a random password, otherwise we use this one
 OE_SUPERADMIN="admin"
 
 # Set to "True" to generate a random password, "False" to use the variable in OE_SUPERADMIN
-GENERATE_RANDOM_PASSWORD="True"
+GENERATE_RANDOM_PASSWORD="False"
 
 OE_CONFIG="${OE_USER}-server"
 
@@ -176,7 +176,7 @@ sudo -u "$OE_USER" "$PYTHON_BIN" -m venv "$VENV_DIR"
 sudo -u "$OE_USER" "$VENV_DIR/bin/pip" install --upgrade pip setuptools wheel
 
 echo -e "\n---- Install python packages/requirements (into venv) ----"
-sudo -u "$OE_USER" "$VENV_DIR/bin/pip" install -r "https://raw.githubusercontent.com/odoo/odoo/${GIT_BRANCH}/requirements.txt"
+sudo -u "$OE_USER" "$VENV_DIR/bin/pip" install --no-cache-dir -r "https://raw.githubusercontent.com/odoo/odoo/${GIT_BRANCH}/requirements.txt"
 
 #--------------------------------------------------
 # Enterprise (optional) - respected login
