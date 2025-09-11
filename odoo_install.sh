@@ -95,7 +95,7 @@ fi
 #--------------------------------------------------
 # Update Server
 #--------------------------------------------------
-echo -e "\n---- Update Server ----
+echo -e "\n---- Update Server ----"
 sudo apt-get update -y
 sudo apt-get upgrade -y
 sudo apt-get install -y libpq-dev curl wget ca-certificates
@@ -176,7 +176,7 @@ sudo -u "$OE_USER" "$PYTHON_BIN" -m venv "$VENV_DIR"
 sudo -u "$OE_USER" "$VENV_DIR/bin/pip" install --upgrade pip setuptools wheel
 
 echo -e "\n---- Install python packages/requirements (into venv) ----"
-sudo -u "$OE_USER" "$VENV_DIR/bin/pip" install -r "https://raw.githubusercontent.com/odoo/odoo/${GIT_BRANCH}/requirements.txt"
+sudo -u "$OE_USER" "$VENV_DIR/bin/pip" install --no-cache-dir -r "https://raw.githubusercontent.com/odoo/odoo/${GIT_BRANCH}/requirements.txt"
 
 #--------------------------------------------------
 # Enterprise (optional) - respected login
