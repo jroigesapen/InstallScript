@@ -8,7 +8,7 @@ set -euo pipefail
 PGHERO_DOMAIN="pghero.domain.dom"
 PGADMIN_DOMAIN="pgadmin.domain.dom"
 
-ENABLE_SSL=true
+ENABLE_SSL="true"
 LETSENCRYPT_EMAIL="admin@example.com"
 
 BASIC_AUTH_USER="admin"
