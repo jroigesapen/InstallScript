@@ -1,182 +1,446 @@
 #!/bin/bash
-################################################################################
-# Script for installing Odoo on Ubuntu 16.04, 18.04, 20.04 and 24.04
-# Rewritten to deploy Traefik (community) instead of Nginx as reverse proxy.
-# Original base author: Yenthe Van Ginneken
-# Rewriter: ChatGPT
-#-------------------------------------------------------------------------------
-# Usage:
-#   chmod +x odoo_install_traefik.sh
-#   sudo ./odoo_install_traefik.sh
-################################################################################
-
 set -euo pipefail
+
+################################################################################
+# Clean Odoo installer with Traefik (community), PgHero (Docker), pgAdmin (APT)
+# - Subdomains + optional IP allowlists for PgHero/pgAdmin
+# - Traefik Basic Auth for both (default admin/admin)
+# - Installs phonenumbers in the Odoo venv
+################################################################################
 
 OE_USER="odoo19"
 OE_HOME="/$OE_USER"
 OE_HOME_EXT="/$OE_USER/${OE_USER}-server"
-
-# The default port where this Odoo instance will run under (provided you use the command -c in the terminal)
-INSTALL_WKHTMLTOPDF="True"
-
-# Set the default Odoo port
-OE_PORT="8069"
-
-# Choose the Odoo version which you want to install. For example: 19.0, 18.0, 17.0 or master.
 OE_VERSION="19.0"
-
-# Set this to True if you want to install the Odoo enterprise version
-IS_ENTERPRISE="True"
-
-# Install PostgreSQL 16 from PGDG (improved performance)
-INSTALL_POSTGRESQL_SIXTEEN="False"
-
-# --- Traefik instead of Nginx ---
-INSTALL_TRAEFIK="True"
-# Force-disable Nginx logic from the original script
-INSTALL_NGINX="False"
-
-# Admin / SSL settings
+OE_PORT="8069"
+LONGPOLLING_PORT="8072"
+OE_CONFIG="${OE_USER}-server"
 OE_SUPERADMIN="admin"
 GENERATE_RANDOM_PASSWORD="False"
-OE_CONFIG="${OE_USER}-server"
-WEBSITE_NAME="_"         # e.g. "erp.example.com"
-LONGPOLLING_PORT="8072"
-ENABLE_SSL="True"        # When True and WEBSITE_NAME & ADMIN_EMAIL are set, Traefik will provision Let's Encrypt
+IS_ENTERPRISE="True"
+INSTALL_POSTGRESQL_SIXTEEN="False"
+INSTALL_WKHTMLTOPDF="True"
+
+# Traefik & SSL
+INSTALL_TRAEFIK="True"
+ENABLE_SSL="True"
+WEBSITE_NAME="_"                 # e.g. erp.example.com
 ADMIN_EMAIL="odoo@example.com"
 
-# ---- Optional DB dashboards ----
+# Optional dashboards
 ENABLE_PGHERO="False"
 ENABLE_PGADMIN="False"
 
-# PgHero connection (will be generated if empty)
+# PgHero DB
 PGHERO_DB_NAME="postgres"
 PGHERO_DB_USER="pghero_user"
-PGHERO_DB_PASSWORD=""   # leave empty to auto-generate
+PGHERO_DB_PASSWORD=""            # auto-generate if empty
 PGHERO_DB_HOST="127.0.0.1"
 PGHERO_DB_PORT="5432"
 
-# pgAdmin defaults (only used when ENABLE_PGADMIN=True)
-PGADMIN_DEFAULT_EMAIL="admin@example.com"
-PGADMIN_DEFAULT_PASSWORD=""  # leave empty to auto-generate
-PGADMIN_LISTEN_PORT="8082"   # bound to localhost, Traefik proxies externally
-PGHERO_LISTEN_PORT="8081"    # bound to localhost, Traefik proxies externally
+# Local listeners
+PGHERO_LISTEN_PORT="8081"
+PGADMIN_LISTEN_PORT="8082"
 
-# Subdomains for dashboards (set valid DNS A/AAAA records)
+# Subdomains
 PGHERO_SUBDOMAIN="pghero.example.com"
 PGADMIN_SUBDOMAIN="pgadmin.example.com"
 
-# (Optional) IP allowlists for Traefik middlewares. Comma-separated CIDRs.
-# Leave empty to disable IP allowlisting.
+# IP allowlists (comma-separated CIDRs) - leave empty to disable
 PGHERO_IP_ALLOWLIST=""
 PGADMIN_IP_ALLOWLIST=""
+
+# Traefik Basic Auth (default admin/admin; change these!)
+PGHERO_BASIC_AUTH_USER="admin"
+PGHERO_BASIC_AUTH_PASS="admin"
+PGADMIN_BASIC_AUTH_USER="admin"
+PGADMIN_BASIC_AUTH_PASS="admin"
 
 # Enterprise Github (optional)
 GITHUB_ENTERPRISE_USER=""
 GITHUB_ENTERPRISE_TOKEN=" "
 
-# ---- Helpers ----
+# Helpers
 PYTHON_BIN="python3"
 VENV_DIR="${OE_HOME_EXT}/venv"
 
 detect_branch () {
   local repo="$1" want="$2"
   if git ls-remote --heads "$repo" "$want" | grep -q "$want"; then
-    echo "$want"
-    return 0
+    echo "$want"; return 0
   fi
   echo ">>> WARNING: Branch '$want' not found on $repo"
-  if [[ "$want" =~ ^19(\.0)?$ ]]; then
-    echo "master"
-  else
-    echo "18.0"
-  fi
+  if [[ "$want" =~ ^19(\.0)?$ ]]; then echo "master"; else echo "18.0"; fi
 }
 
 detect_pg_version () {
   if command -v psql >/dev/null 2>&1; then
     local v
-    v="$( if [ "$ENABLE_PGHERO" = "True" ]; then cat <<'EOT'
+    v="$(psql -V | awk '{print $3}' | cut -d. -f1)"
+    echo "$v"; return 0
+  fi
+  echo ""; return 1
+}
+
+echo "---- Update & base packages ----"
+apt-get update -y
+apt-get upgrade -y
+apt-get install -y libpq-dev curl wget ca-certificates gnupg lsb-release git build-essential \
+  python3 python3-pip python3-venv python3-dev python3-wheel python3-setuptools nodejs npm \
+  libxslt-dev libzip-dev libldap2-dev libsasl2-dev node-less libpng-dev libjpeg-dev gdebi-core
+
+npm install -g rtlcss || true
+
+echo "---- PostgreSQL ----"
+if [ "$INSTALL_POSTGRESQL_SIXTEEN" = "True" ]; then
+  curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg
+  sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+  apt-get update -y && apt-get install -y postgresql-16 postgresql-client-16 postgresql-contrib-16
+else
+  apt-get install -y postgresql postgresql-server-dev-all
+fi
+
+echo "---- Create Odoo PostgreSQL user ----"
+su - postgres -c "createuser -s $OE_USER" 2>/dev/null || true
+
+echo "---- Enable pg_stat_statements + PgHero role ----"
+PG_VERSION="$(detect_pg_version || true)"
+if [ -n "$PG_VERSION" ]; then
+  PG_CONF_DIR="/etc/postgresql/${PG_VERSION}/main"
+  PG_CONF="$PG_CONF_DIR/postgresql.conf"
+  if [ -f "$PG_CONF" ]; then
+    sed -i "s/^#\?\s*shared_preload_libraries.*/shared_preload_libraries = 'pg_stat_statements'/g" "$PG_CONF" || true
+    grep -q "^shared_preload_libraries" "$PG_CONF" || echo "shared_preload_libraries = 'pg_stat_statements'" >> "$PG_CONF"
+    systemctl restart postgresql || true
+  fi
+  if [ "$ENABLE_PGHERO" = "True" ]; then
+    [ -z "$PGHERO_DB_PASSWORD" ] && PGHERO_DB_PASSWORD="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20)"
+    su - postgres -c "psql -Atqc \"DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${PGHERO_DB_USER}') THEN CREATE ROLE ${PGHERO_DB_USER} LOGIN PASSWORD '${PGHERO_DB_PASSWORD}'; END IF; END \$\$;\""
+    su - postgres -c "psql -Atqc \"GRANT CONNECT ON DATABASE ${PGHERO_DB_NAME} TO ${PGHERO_DB_USER};\""
+    su - postgres -c "psql -d \"${PGHERO_DB_NAME}\" -Atqc \"GRANT USAGE ON SCHEMA public TO ${PGHERO_DB_USER};\""
+    su - postgres -c "psql -d \"${PGHERO_DB_NAME}\" -Atqc \"GRANT SELECT ON ALL TABLES IN SCHEMA public TO ${PGHERO_DB_USER};\""
+    su - postgres -c "psql -d \"${PGHERO_DB_NAME}\" -Atqc \"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO ${PGHERO_DB_USER};\""
+    su - postgres -c "psql -d \"${PGHERO_DB_NAME}\" -Atqc \"CREATE EXTENSION IF NOT EXISTS pg_stat_statements;\""
+  fi
+fi
+
+echo "---- Create system user & directories ----"
+id "$OE_USER" >/dev/null 2>&1 || adduser --system --quiet --shell=/bin/bash --home="$OE_HOME" --gecos 'ODOO' --group "$OE_USER"
+adduser "$OE_USER" sudo || true
+mkdir -p "$OE_HOME_EXT" "$OE_HOME/custom/addons" "/var/log/$OE_USER"
+chown -R "$OE_USER:$OE_USER" "$OE_HOME" "/var/log/$OE_USER"
+
+echo "---- Clone Odoo ----"
+REPO_URL="https://github.com/odoo/odoo"
+GIT_BRANCH="$(detect_branch "$REPO_URL" "$OE_VERSION")"
+if [ ! -d "$OE_HOME_EXT/.git" ]; then
+  git clone --depth 1 --branch "$GIT_BRANCH" https://www.github.com/odoo/odoo "$OE_HOME_EXT/"
+else
+  git -C "$OE_HOME_EXT" fetch --depth 1 origin "$GIT_BRANCH" || true
+  git -C "$OE_HOME_EXT" checkout "$GIT_BRANCH"
+  git -C "$OE_HOME_EXT" pull --ff-only || true
+fi
+chown -R "$OE_USER:$OE_USER" "$OE_HOME_EXT"
+
+echo "---- Python venv & requirements (incl. phonenumbers) ----"
+sudo -u "$OE_USER" "$PYTHON_BIN" -m venv "$VENV_DIR"
+sudo -u "$OE_USER" "$VENV_DIR/bin/pip" install --upgrade pip setuptools wheel
+sudo -u "$OE_USER" "$VENV_DIR/bin/pip" install --no-cache-dir -r "https://raw.githubusercontent.com/odoo/odoo/${GIT_BRANCH}/requirements.txt"
+sudo -u "$OE_USER" "$VENV_DIR/bin/pip" install --no-cache-dir phonenumbers
+
+echo "---- Wkhtmltopdf / paper-muncher ----"
+if [ "$INSTALL_WKHTMLTOPDF" = "True" ]; then
+  if [ "$(lsb_release -r -s)" = "24.04" ]; then
+    apt-get install -y wkhtmltopdf
+    wget -q https://github.com/odoo/paper-muncher/releases/download/nightly/paper-muncher_nightly_noble_amd64.deb -O /tmp/paper-muncher.deb
+    apt-get install -y /tmp/paper-muncher.deb || dpkg -i /tmp/paper-muncher.deb || true
+    ln -sf /opt/paper-muncher/bin/paper-muncher /usr/bin/paper-muncher || true
+  else
+    WKHTMLTOX_X64="https://github.com/wkhtmltopdf/wkhtmltopdf/releases/download/0.12.5/wkhtmltox_0.12.5-1.$(lsb_release -c -s)_amd64.deb"
+    wget -q "$WKHTMLTOX_X64" -O /tmp/wkhtmltox.deb
+    gdebi --non-interactive /tmp/wkhtmltox.deb || apt-get install -y /tmp/wkhtmltox.deb || true
+    ln -sf /usr/local/bin/wkhtmltopdf /usr/bin/wkhtmltopdf || true
+    ln -sf /usr/local/bin/wkhtmltoimage /usr/bin/wkhtmltoimage || true
+  fi
+fi
+
+echo "---- Odoo config ----"
+touch /etc/${OE_CONFIG}.conf
+{
+  echo "[options]"
+  echo "; admin password for database operations"
+  if [ "$GENERATE_RANDOM_PASSWORD" = "True" ]; then
+    OE_SUPERADMIN="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16)"
+  fi
+  echo "admin_passwd = ${OE_SUPERADMIN}"
+  echo "http_port = ${OE_PORT}"
+  echo "longpolling_port = ${LONGPOLLING_PORT}"
+  echo "logfile = /var/log/${OE_USER}/${OE_CONFIG}.log"
+  echo "addons_path = ${OE_HOME_EXT}/addons,${OE_HOME}/custom/addons"
+} > /etc/${OE_CONFIG}.conf
+chown "$OE_USER:$OE_USER" /etc/${OE_CONFIG}.conf
+chmod 640 /etc/${OE_CONFIG}.conf
+
+echo "---- Init script ----"
+cat >/etc/init.d/$OE_CONFIG <<'EOF'
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          Odoo service
+# Required-Start:    $remote_fs $syslog
+# Required-Stop:     $remote_fs $syslog
+# Should-Start:      $network
+# Should-Stop:       $network
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Enterprise Business Applications
+# Description:       ODOO Business Applications
+### END INIT INFO
+PATH=/sbin:/bin:/usr/sbin:/usr/bin
+DAEMON=/odoo19/odoo19-server/odoo-bin
+NAME=odoo19-server
+DESC=odoo19-server
+USER=odoo19
+CONFIGFILE="/etc/odoo19-server.conf"
+PIDFILE=/var/run/${NAME}.pid
+DAEMON_OPTS="-c ${CONFIGFILE}"
+[ -x ${DAEMON} ] || exit 0
+[ -f ${CONFIGFILE} ] || exit 0
+case "$1" in
+  start) start-stop-daemon --start --quiet --pidfile ${PIDFILE} --chuid ${USER} --background --make-pidfile --exec ${DAEMON} -- ${DAEMON_OPTS};;
+  stop) start-stop-daemon --stop --quiet --pidfile ${PIDFILE} --oknodo;;
+  restart|force-reload) start-stop-daemon --stop --quiet --pidfile ${PIDFILE} --oknodo; sleep 1; start-stop-daemon --start --quiet --pidfile ${PIDFILE} --chuid ${USER} --background --make-pidfile --exec ${DAEMON} -- ${DAEMON_OPTS};;
+  *) echo "Usage: $NAME {start|stop|restart|force-reload}" >&2; exit 1;;
+esac
+exit 0
+EOF
+chmod 755 /etc/init.d/$OE_CONFIG
+chown root: /etc/init.d/$OE_CONFIG
+update-rc.d $OE_CONFIG defaults
+
+#--------------------------------------------------
+# pgAdmin (APT) and PgHero (Docker) services
+#--------------------------------------------------
+if [ "$ENABLE_PGHERO" = "True" ]; then
+  apt-get update -y
+  apt-get install -y docker.io
+  systemctl enable docker
+  systemctl start docker
+
+  PGHERO_URL="postgres://${PGHERO_DB_USER}:${PGHERO_DB_PASSWORD}@${PGHERO_DB_HOST}:${PGHERO_DB_PORT}/${PGHERO_DB_NAME}"
+  cat >/etc/systemd/system/pghero.service <<EOF
+[Unit]
+Description=PgHero (Docker)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Restart=always
+ExecStart=/usr/bin/docker run --rm --name pghero -p 127.0.0.1:${PGHERO_LISTEN_PORT}:8080 -e DATABASE_URL="${PGHERO_URL}" ankane/pghero
+ExecStop=/usr/bin/docker stop pghero
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable pghero
+  systemctl restart pghero
+fi
+
+if [ "$ENABLE_PGADMIN" = "True" ]; then
+  echo "---- Installing pgAdmin4 (APT) ----"
+  curl -fsSLo /usr/share/keyrings/pgadmin-keyring.gpg https://www.pgadmin.org/static/packages_pgadmin_org.pub
+  sh -c 'echo "deb [signed-by=/usr/share/keyrings/pgadmin-keyring.gpg] https://ftp.postgresql.org/pub/pgadmin/pgadmin4/apt/$(lsb_release -cs) pgadmin4 main" > /etc/apt/sources.list.d/pgadmin4.list'
+  apt-get update -y
+  DEBIAN_FRONTEND=noninteractive apt-get install -y pgadmin4-web
+  /usr/pgadmin4/bin/setup-web.sh --yes
+  # Bind Apache only on localhost:PGADMIN_LISTEN_PORT
+  if [ -f /etc/apache2/ports.conf ]; then
+    sed -i "s/^\s*Listen .*/Listen 127.0.0.1:${PGADMIN_LISTEN_PORT}/g" /etc/apache2/ports.conf
+    grep -q "Listen 127.0.0.1:${PGADMIN_LISTEN_PORT}" /etc/apache2/ports.conf || echo "Listen 127.0.0.1:${PGADMIN_LISTEN_PORT}" >> /etc/apache2/ports.conf
+  fi
+  if [ -f /etc/apache2/sites-available/pgadmin4.conf ]; then
+    sed -i "s#<VirtualHost \*:80>#<VirtualHost 127.0.0.1:${PGADMIN_LISTEN_PORT}>#g" /etc/apache2/sites-available/pgadmin4.conf
+  fi
+  systemctl restart apache2
+fi
+
+#--------------------------------------------------
+# Traefik
+#--------------------------------------------------
+if [ "$INSTALL_TRAEFIK" = "True" ]; then
+  apt-get update -y
+  apt-get install -y traefik
+  mkdir -p /etc/traefik/dynamic
+  mkdir -p /var/lib/traefik
+  touch /var/lib/traefik/acme.json
+  chmod 600 /var/lib/traefik/acme.json
+
+  cat >/etc/traefik/traefik.yml <<'EOF'
+entryPoints:
+  web: { address: ":80" }
+  websecure: { address: ":443" }
+
+api: { dashboard: false }
+
+providers:
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+
+serversTransport:
+  forwardingTimeouts:
+    idleTimeout: "900s"
+    responseHeaderTimeout: "900s"
+
+log: { level: INFO }
+accessLog: {}
+EOF
+
+  # Dynamic: Odoo + optional dashboards
+  cat >/etc/traefik/dynamic/odoo.yml <<'EOF'
+http:
+  middlewares:
+    redirect-to-https:
+      redirectScheme:
+        scheme: https
+        permanent: true
+    secure-headers:
+      headers:
+        frameDeny: false
+        customRequestHeaders:
+          X-Forwarded-Host: "${host}"
+          X-Forwarded-Proto: "${scheme}"
+          X-Real-IP: "${remoteAddr}"
+        customResponseHeaders:
+          X-Frame-Options: "SAMEORIGIN"
+          X-XSS-Protection: "1; mode=block"
+    pghero-allow:
+      ipAllowList:
+        sourceRange: [PGHERO_IPS_PLACEHOLDER]
+    pgadmin-allow:
+      ipAllowList:
+        sourceRange: [PGADMIN_IPS_PLACEHOLDER]
+    pghero-auth:
+      basicAuth:
+        users:
+          - "PGHERO_AUTH_PLACEHOLDER"
+    pgadmin-auth:
+      basicAuth:
+        users:
+          - "PGADMIN_AUTH_PLACEHOLDER"
+
+  routers:
+    odoo-redirect:
+      rule: "Host(`WEBSITE_NAME_PLACEHOLDER`)"
+      entryPoints: ["web"]
+      service: odoo-svc
+      middlewares: ["redirect-to-https"]
+
+    odoo-websecure:
+      rule: "Host(`WEBSITE_NAME_PLACEHOLDER`) && PathPrefix(`/`)"
+      entryPoints: ["websecure"]
+      service: odoo-svc
+      middlewares: ["secure-headers"]
+      tls: { certResolver: letsencrypt }
+
+    odoo-longpolling:
+      rule: "Host(`WEBSITE_NAME_PLACEHOLDER`) && PathPrefix(`/longpolling`)"
+      entryPoints: ["websecure"]
+      service: odoo-longpolling-svc
+      middlewares: ["secure-headers"]
+      tls: { certResolver: letsencrypt }
+
     pghero:
       rule: "Host(`PGHERO_SUBDOMAIN_PLACEHOLDER`)"
       entryPoints: ["websecure"]
       service: pghero-svc
-      middlewares: ["secure-headers", "pghero-auth"$( [ -n "$PGHERO_IP_ALLOWLIST" , "pghero-auth"] && echo ', "pghero-allow"' )]
-      tls:
-        certResolver: letsencrypt
-EOT
-fi )
+      middlewares: ["secure-headers", "pghero-auth"]
+      tls: { certResolver: letsencrypt }
 
-$( 
-if [ "$ENABLE_PGADMIN" = "True" ]; then
-  echo -e "\n---- Installing pgAdmin4 (non-Docker, APT repo) ----"
-  # Add official pgAdmin APT repo
-  curl -fsSLo /usr/share/keyrings/pgadmin-keyring.gpg https://www.pgadmin.org/static/packages_pgadmin_org.pub
-  sh -c 'echo "deb [signed-by=/usr/share/keyrings/pgadmin-keyring.gpg] https://ftp.postgresql.org/pub/pgadmin/pgadmin4/apt/$(lsb_release -cs) pgadmin4 main" > /etc/apt/sources.list.d/pgadmin4.list'
-  apt-get update -y
-  apt-get install -y pgadmin4-web
+    pgadmin:
+      rule: "Host(`PGADMIN_SUBDOMAIN_PLACEHOLDER`)"
+      entryPoints: ["websecure"]
+      service: pgadmin-svc
+      middlewares: ["secure-headers", "pgadmin-auth"]
+      tls: { certResolver: letsencrypt }
 
-  # Non-interactive setup
-  /usr/pgadmin4/bin/setup-web.sh --yes
+  services:
+    odoo-svc:
+      loadBalancer:
+        servers: [ { url: "http://127.0.0.1:OE_PORT_PLACEHOLDER" } ]
+        passHostHeader: true
+    odoo-longpolling-svc:
+      loadBalancer:
+        servers: [ { url: "http://127.0.0.1:LONGPOLL_PLACEHOLDER" } ]
+        passHostHeader: true
+    pghero-svc:
+      loadBalancer:
+        servers: [ { url: "http://127.0.0.1:PGHERO_PORT_PLACEHOLDER" } ]
+        passHostHeader: true
+    pgadmin-svc:
+      loadBalancer:
+        servers: [ { url: "http://127.0.0.1:PGADMIN_PORT_PLACEHOLDER" } ]
+        passHostHeader: true
+EOF
 
-  # Rebind Apache to localhost:${PGADMIN_LISTEN_PORT}
-  if [ -f /etc/apache2/ports.conf ]; then
-    sed -i 's/^\s*Listen .*/Listen 127.0.0.1:${PGADMIN_LISTEN_PORT}/g' /etc/apache2/ports.conf
-    grep -q "Listen 127.0.0.1:${PGADMIN_LISTEN_PORT}" /etc/apache2/ports.conf || echo "Listen 127.0.0.1:${PGADMIN_LISTEN_PORT}" >> /etc/apache2/ports.conf
-  fi
-  if [ -f /etc/apache2/sites-available/pgadmin4.conf ]; then
-    sed -i "s#<VirtualHost \\*:80>#<VirtualHost 127.0.0.1:${PGADMIN_LISTEN_PORT}>#g" /etc/apache2/sites-available/pgadmin4.conf
-  fi
-  systemctl restart apache2
+  # Replace placeholders
+  sed -i "s|WEBSITE_NAME_PLACEHOLDER|${WEBSITE_NAME}|g" /etc/traefik/dynamic/odoo.yml
+  sed -i "s|OE_PORT_PLACEHOLDER|${OE_PORT}|g" /etc/traefik/dynamic/odoo.yml
+  sed -i "s|LONGPOLL_PLACEHOLDER|${LONGPOLLING_PORT}|g" /etc/traefik/dynamic/odoo.yml
+  sed -i "s|PGHERO_SUBDOMAIN_PLACEHOLDER|${PGHERO_SUBDOMAIN}|g" /etc/traefik/dynamic/odoo.yml
+  sed -i "s|PGADMIN_SUBDOMAIN_PLACEHOLDER|${PGADMIN_SUBDOMAIN}|g" /etc/traefik/dynamic/odoo.yml
+  sed -i "s|PGHERO_PORT_PLACEHOLDER|${PGHERO_LISTEN_PORT}|g" /etc/traefik/dynamic/odoo.yml
+  sed -i "s|PGADMIN_PORT_PLACEHOLDER|${PGADMIN_LISTEN_PORT}|g" /etc/traefik/dynamic/odoo.yml
 
-  echo "pgAdmin4 installed. Access will be proxied by Traefik at https://${PGADMIN_SUBDOMAIN}"
-fi
-  if [ -n "$PGADMIN_IP_ALLOWLIST" ]; then
-    PGADMIN_IPS=$(echo "$PGADMIN_IP_ALLOWLIST" | sed "s/,/\", \"/g")
-    sudo sed -i "s|PGADMIN_IPS_PLACEHOLDER|\"${PGADMIN_IPS}\"|g" /etc/traefik/dynamic/odoo.yml
+  # Basic auth hashes
+  PGHERO_HTPASS=$(openssl passwd -apr1 "${PGHERO_BASIC_AUTH_PASS}")
+  PGADMIN_HTPASS=$(openssl passwd -apr1 "${PGADMIN_BASIC_AUTH_PASS}")
+  sed -i "s|PGHERO_AUTH_PLACEHOLDER|${PGHERO_BASIC_AUTH_USER}:${PGHERO_HTPASS}|g" /etc/traefik/dynamic/odoo.yml
+  sed -i "s|PGADMIN_AUTH_PLACEHOLDER|${PGADMIN_BASIC_AUTH_USER}:${PGADMIN_HTPASS}|g" /etc/traefik/dynamic/odoo.yml
+
+  # IP allowlists
+  if [ -n "$PGHERO_IP_ALLOWLIST" ]; then
+    PGHERO_IPS=$(echo "$PGHERO_IP_ALLOWLIST" | sed 's/,/\", \"/g')
+    sed -i "s|PGHERO_IPS_PLACEHOLDER|\"${PGHERO_IPS}\"|g" /etc/traefik/dynamic/odoo.yml
   else
-    sudo sed -i "s|PGADMIN_IPS_PLACEHOLDER||g" /etc/traefik/dynamic/odoo.yml
+    sed -i "s|PGHERO_IPS_PLACEHOLDER||g" /etc/traefik/dynamic/odoo.yml
+  fi
+  if [ -n "$PGADMIN_IP_ALLOWLIST" ]; then
+    PGADMIN_IPS=$(echo "$PGADMIN_IP_ALLOWLIST" | sed 's/,/\", \"/g')
+    sed -i "s|PGADMIN_IPS_PLACEHOLDER|\"${PGADMIN_IPS}\"|g" /etc/traefik/dynamic/odoo.yml
+  else
+    sed -i "s|PGADMIN_IPS_PLACEHOLDER||g" /etc/traefik/dynamic/odoo.yml
   fi
 
-  # If SSL is enabled & domain/email are set, append ACME config
+  # ACME
   if [ "$ENABLE_SSL" = "True" ] && [ "$ADMIN_EMAIL" != "odoo@example.com" ] && [ "$WEBSITE_NAME" != "_" ]; then
-    sudo bash -c 'cat >> /etc/traefik/traefik.yml' <<EOF
+    cat >>/etc/traefik/traefik.yml <<EOF
 certificatesResolvers:
   letsencrypt:
     acme:
       email: "${ADMIN_EMAIL}"
       storage: "/var/lib/traefik/acme.json"
-      httpChallenge:
-        entryPoint: web
+      httpChallenge: { entryPoint: web }
 EOF
-  else
-    echo "INFO: SSL is disabled or misconfigured (ADMIN_EMAIL/WEBSITE_NAME). Running HTTP only on :80."
   fi
 
-  # Ensure Traefik uses our YAML (Ubuntu package may default to TOML). Create a systemd drop-in.
-  sudo mkdir -p /etc/systemd/system/traefik.service.d
-  sudo bash -c 'cat > /etc/systemd/system/traefik.service.d/override.conf' <<'EOF'
+  # Systemd override for yaml
+  mkdir -p /etc/systemd/system/traefik.service.d
+  cat >/etc/systemd/system/traefik.service.d/override.conf <<'EOF'
 [Service]
 ExecStart=
 ExecStart=/usr/bin/traefik --configFile=/etc/traefik/traefik.yml
 EOF
+  systemctl daemon-reload
+  systemctl enable traefik
+  systemctl restart traefik
 
-  sudo systemctl daemon-reload
-  sudo systemctl enable traefik
-  sudo systemctl restart traefik
-
-  # Enable proxy mode in Odoo config
-  sudo su root -c "grep -q '^proxy_mode' /etc/${OE_CONFIG}.conf || printf 'proxy_mode = True\n' >> /etc/${OE_CONFIG}.conf"
-
-  echo "Done! Traefik is up and proxying to Odoo."
-else
-  echo "Traefik isn't installed due to user choice!"
+  # Proxy mode in Odoo
+  grep -q '^proxy_mode' /etc/${OE_CONFIG}.conf || printf 'proxy_mode = True\n' >> /etc/${OE_CONFIG}.conf
 fi
 
-# Certbot section removed: Traefik handles ACME automatically when ENABLE_SSL=True.
-
-echo -e "* Starting Odoo Service"
-sudo su root -c "/etc/init.d/$OE_CONFIG start"
+echo "---- Start Odoo ----"
+/etc/init.d/$OE_CONFIG start || true
 
 echo "-----------------------------------------------------------"
 echo "Done! The Odoo server is up and running. Specifications:"
@@ -185,15 +449,10 @@ echo "User service: $OE_USER"
 echo "Configuraton file location: /etc/${OE_CONFIG}.conf"
 echo "Logfile location: /var/log/$OE_USER"
 echo "User PostgreSQL: $OE_USER"
-echo "Code location: $OE_USER"
-echo "Addons folder: $OE_USER/$OE_CONFIG/addons/"
+echo "Code location: $OE_HOME_EXT"
+echo "Addons folder: $OE_HOME_EXT/addons, $OE_HOME/custom/addons"
 echo "Password superadmin (database): $OE_SUPERADMIN"
-echo "Start Odoo service: sudo service $OE_CONFIG start"
-echo "Stop Odoo service: sudo service $OE_CONFIG stop"
-echo "Restart Odoo service: sudo service $OE_CONFIG restart"
-if [ "$INSTALL_TRAEFIK" = "True" ]; then
-  echo "Traefik main config: /etc/traefik/traefik.yml"
-  echo "Traefik dynamic config: /etc/traefik/dynamic/odoo.yml"
-  echo "ACME storage: /var/lib/traefik/acme.json"
-fi
+echo "Traefik main config: /etc/traefik/traefik.yml"
+echo "Traefik dynamic config: /etc/traefik/dynamic/odoo.yml"
+echo "ACME storage: /var/lib/traefik/acme.json"
 echo "-----------------------------------------------------------"
