@@ -2,10 +2,11 @@
 set -euo pipefail
 
 ################################################################################
-# Clean Odoo installer with Traefik (community), PgHero (Docker), pgAdmin (APT)
-# - Subdomains + optional IP allowlists for PgHero/pgAdmin
-# - Traefik Basic Auth for both (default admin/admin)
-# - Installs phonenumbers in the Odoo venv
+# Odoo installer with Traefik (community), PgHero (Docker) & pgAdmin (APT)
+# - Subdominios + IP allowlists opcionales para PgHero/pgAdmin
+# - Traefik Basic Auth para ambos (usuario/clave por defecto: admin/admin)
+# - Instala 'phonenumbers' en el venv de Odoo
+# Probado con 'bash -n'
 ################################################################################
 
 OE_USER="odoo19"
@@ -27,36 +28,36 @@ ENABLE_SSL="True"
 WEBSITE_NAME="_"                 # e.g. erp.example.com
 ADMIN_EMAIL="odoo@example.com"
 
-# Optional dashboards
+# Dashboards opcionales
 ENABLE_PGHERO="False"
 ENABLE_PGADMIN="False"
 
 # PgHero DB
 PGHERO_DB_NAME="postgres"
 PGHERO_DB_USER="pghero_user"
-PGHERO_DB_PASSWORD=""            # auto-generate if empty
+PGHERO_DB_PASSWORD=""            # autogenera si vacío
 PGHERO_DB_HOST="127.0.0.1"
 PGHERO_DB_PORT="5432"
 
-# Local listeners
+# Puertos locales (solo loopback)
 PGHERO_LISTEN_PORT="8081"
 PGADMIN_LISTEN_PORT="8082"
 
-# Subdomains
+# Subdominios
 PGHERO_SUBDOMAIN="pghero.example.com"
 PGADMIN_SUBDOMAIN="pgadmin.example.com"
 
-# IP allowlists (comma-separated CIDRs) - leave empty to disable
+# IP allowlists (CIDRs separados por comas) - dejar vacío para desactivar
 PGHERO_IP_ALLOWLIST=""
 PGADMIN_IP_ALLOWLIST=""
 
-# Traefik Basic Auth (default admin/admin; change these!)
+# Traefik Basic Auth (cambia estas credenciales)
 PGHERO_BASIC_AUTH_USER="admin"
 PGHERO_BASIC_AUTH_PASS="admin"
 PGADMIN_BASIC_AUTH_USER="admin"
 PGADMIN_BASIC_AUTH_PASS="admin"
 
-# Enterprise Github (optional)
+# Enterprise Github (opcional)
 GITHUB_ENTERPRISE_USER=""
 GITHUB_ENTERPRISE_TOKEN=" "
 
@@ -113,14 +114,30 @@ if [ -n "$PG_VERSION" ]; then
     grep -q "^shared_preload_libraries" "$PG_CONF" || echo "shared_preload_libraries = 'pg_stat_statements'" >> "$PG_CONF"
     systemctl restart postgresql || true
   fi
+
   if [ "$ENABLE_PGHERO" = "True" ]; then
     [ -z "$PGHERO_DB_PASSWORD" ] && PGHERO_DB_PASSWORD="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20)"
-    su - postgres -c "psql -Atqc \"DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${PGHERO_DB_USER}') THEN CREATE ROLE ${PGHERO_DB_USER} LOGIN PASSWORD '${PGHERO_DB_PASSWORD}'; END IF; END \$\$;\""
-    su - postgres -c "psql -Atqc \"GRANT CONNECT ON DATABASE ${PGHERO_DB_NAME} TO ${PGHERO_DB_USER};\""
-    su - postgres -c "psql -d \"${PGHERO_DB_NAME}\" -Atqc \"GRANT USAGE ON SCHEMA public TO ${PGHERO_DB_USER};\""
-    su - postgres -c "psql -d \"${PGHERO_DB_NAME}\" -Atqc \"GRANT SELECT ON ALL TABLES IN SCHEMA public TO ${PGHERO_DB_USER};\""
-    su - postgres -c "psql -d \"${PGHERO_DB_NAME}\" -Atqc \"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO ${PGHERO_DB_USER};\""
-    su - postgres -c "psql -d \"${PGHERO_DB_NAME}\" -Atqc \"CREATE EXTENSION IF NOT EXISTS pg_stat_statements;\""
+
+    # Bloque robusto mediante heredoc entrecomillado (sin expansión de bash)
+    sudo -u postgres psql \
+      -v uname="${PGHERO_DB_USER}" \
+      -v upass="${PGHERO_DB_PASSWORD}" \
+      -v dbname="${PGHERO_DB_NAME}" <<'SQL'
+DO $do$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = :'uname') THEN
+    EXECUTE format('CREATE ROLE %I LOGIN PASSWORD %L', :'uname', :'upass');
+  END IF;
+END
+$do$;
+
+GRANT CONNECT ON DATABASE :"dbname" TO :"uname";
+\connect :"dbname"
+GRANT USAGE ON SCHEMA public TO :"uname";
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO :"uname";
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO :"uname";
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+SQL
   fi
 fi
 
@@ -218,7 +235,7 @@ chown root: /etc/init.d/$OE_CONFIG
 update-rc.d $OE_CONFIG defaults
 
 #--------------------------------------------------
-# pgAdmin (APT) and PgHero (Docker) services
+# pgAdmin (APT) y PgHero (Docker)
 #--------------------------------------------------
 if [ "$ENABLE_PGHERO" = "True" ]; then
   apt-get update -y
@@ -253,7 +270,7 @@ if [ "$ENABLE_PGADMIN" = "True" ]; then
   apt-get update -y
   DEBIAN_FRONTEND=noninteractive apt-get install -y pgadmin4-web
   /usr/pgadmin4/bin/setup-web.sh --yes
-  # Bind Apache only on localhost:PGADMIN_LISTEN_PORT
+  # Bind Apache solo en localhost:PGADMIN_LISTEN_PORT
   if [ -f /etc/apache2/ports.conf ]; then
     sed -i "s/^\s*Listen .*/Listen 127.0.0.1:${PGADMIN_LISTEN_PORT}/g" /etc/apache2/ports.conf
     grep -q "Listen 127.0.0.1:${PGADMIN_LISTEN_PORT}" /etc/apache2/ports.conf || echo "Listen 127.0.0.1:${PGADMIN_LISTEN_PORT}" >> /etc/apache2/ports.conf
@@ -296,7 +313,7 @@ log: { level: INFO }
 accessLog: {}
 EOF
 
-  # Dynamic: Odoo + optional dashboards
+  # Dynamic: Odoo + dashboards
   cat >/etc/traefik/dynamic/odoo.yml <<'EOF'
 http:
   middlewares:
@@ -424,7 +441,7 @@ certificatesResolvers:
 EOF
   fi
 
-  # Systemd override for yaml
+  # Systemd override para YAML
   mkdir -p /etc/systemd/system/traefik.service.d
   cat >/etc/systemd/system/traefik.service.d/override.conf <<'EOF'
 [Service]
@@ -435,7 +452,7 @@ EOF
   systemctl enable traefik
   systemctl restart traefik
 
-  # Proxy mode in Odoo
+  # proxy_mode en Odoo
   grep -q '^proxy_mode' /etc/${OE_CONFIG}.conf || printf 'proxy_mode = True\n' >> /etc/${OE_CONFIG}.conf
 fi
 
